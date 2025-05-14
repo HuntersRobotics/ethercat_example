@@ -9,8 +9,14 @@
 
 class App :public EthercatNode{
 public:
-  void Config();
-  virtual void RunOnce() override;
+ App(bool *running);
+ ~App();
+ void Config();
+ bool InitializeDevices();
+ virtual void RunOnce() override;
+
+private:
+ bool *running_;
 };
 
 

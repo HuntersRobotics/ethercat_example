@@ -18,6 +18,14 @@ class EthercatNode {
     uint32_t vendor_id;
     uint32_t product_code;
   } SalveParam;
+  typedef struct {
+    uint16_t alias;
+    uint16_t position;
+    uint32_t vendor_id;
+    uint32_t product_code;
+    ec_slave_config_t *sc;
+    ec_slave_config_state_t sc_state;
+  } EcSlaveConfig;
   EthercatNode();
   ~EthercatNode();
   virtual void RunOnce() = 0;
@@ -30,19 +38,11 @@ class EthercatNode {
   ec_master_t *master_ = nullptr;
   ec_domain_t *domain_ = nullptr;
   uint8_t *process_data_{nullptr};
+  std::vector<EcSlaveConfig> slave_configs_;
 
  private:
   ec_master_state_t master_state_;
   ec_domain_state_t domain_state_;
-  typedef struct {
-    uint16_t alias;
-    uint16_t position;
-    uint32_t vendor_id;
-    uint32_t product_code;
-    ec_slave_config_t *sc;
-    ec_slave_config_state_t sc_state;
-  } EcSlaveConfig;
-  std::vector<EcSlaveConfig> slave_configs_;
   const ec_pdo_entry_reg_t *pdo_entry_regs_;
 };
 

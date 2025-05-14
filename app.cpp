@@ -3,6 +3,9 @@
 //
 
 #include "app.h"
+
+#include <thread>
+
 #include "kaylordut/log/logger.h"
 
 struct PDO_offset {
@@ -31,14 +34,23 @@ const static ec_pdo_entry_reg_t pdo_entry_regs[] = {
     {0,0,  0x300077, 0x1, 0x6000, 0x02, &user_data.input_bit2, &user_data.offset_input_bit2},
     {}};
 
+App::App(bool* running) { running_ = running; }
+
+App::~App() {}
+
 void App::Config() {
   std::vector<EthercatNode::SalveParam> salve_param;
-  EthercatNode::SalveParam zeroerr_motor;
-  zeroerr_motor.alias = 0;
-  zeroerr_motor.position = 1;
-  zeroerr_motor.vendor_id = 0x5a65726f;
-  zeroerr_motor.product_code = 0x29252;
-  salve_param.push_back(zeroerr_motor);
+  EthercatNode::SalveParam sample;
+  sample.alias = 0;
+  sample.position = 1;
+  sample.vendor_id = 0x5a65726f;
+  sample.product_code = 0x29252;
+  salve_param.push_back(sample);
+  sample.alias = 0;
+  sample.position = 0;
+  sample.vendor_id = 0x300077;
+  sample.product_code = 0x01;
+  salve_param.push_back(sample);
   // 这里只有一个master，所以index是0
   Initialize(salve_param, pdo_entry_regs, 0);
 }
@@ -51,15 +63,31 @@ void App::RunOnce() {
   auto status = EC_READ_U16(process_data_ + user_data.status_word);
   auto position = EC_READ_U32(process_data_ + user_data.position_value);
   // 读取国民技术的IO的状态，同时把IO状态写到LED上去
-  uint8_t input1 = EC_READ_BIT(process_data_ + user_data.input_bit1, user_data.offset_input_bit1);
-  uint8_t input2 = EC_READ_BIT(process_data_ + user_data.input_bit2, user_data.offset_input_bit2);
-  EC_WRITE_BIT(process_data_ + user_data.output_bit1, user_data.offset_output_bit1, input1);
-  EC_WRITE_BIT(process_data_ + user_data.output_bit2, user_data.offset_output_bit2, input2);
+  uint8_t input1 = EC_READ_BIT(process_data_ + user_data.input_bit1,
+                               user_data.offset_input_bit1);
+  uint8_t input2 = EC_READ_BIT(process_data_ + user_data.input_bit2,
+                               user_data.offset_input_bit2);
+  EC_WRITE_BIT(process_data_ + user_data.output_bit1,
+               user_data.offset_output_bit1, input1);
+  EC_WRITE_BIT(process_data_ + user_data.output_bit2,
+               user_data.offset_output_bit2, input2);
+  if (slave_configs_.at(0).sc_state.operational == 1 &&
+      (status & 0x0F) == 0x07) {
+    // 只有准备打开伺服 伺服使能
+    // 和伺服运行同时满足，并且没有故障的时候，才下发控制指令
+    if ((status & 0x0400)) {
+      // 如果到达目标位置了，才会切换下一个目标
+      KAYLORDUT_LOG_DEBUG("set target position to {}", position - 100);
+      EC_WRITE_S32(process_data_ + user_data.target_position, position - 100);
+    }
+  }
+
   static uint32_t num = 0;
   if (num == 999) {
     num = 0;
-    KAYLORDUT_LOG_INFO("status: 0x{:04X}, position value: {}, input1: {}, input2: {}", status,
-                       position, input1, input2);
+    KAYLORDUT_LOG_INFO(
+        "status: 0x{:04X}, position value: {}, input1: {}, input2: {}", status,
+        position, input1, input2);
   }
   num++;
   // send process data
@@ -67,4 +95,61 @@ void App::RunOnce() {
   ecrt_master_send(master_);
 }
 
-
+bool App::InitializeDevices() {
+  bool ret = false;
+  while (*running_ && (!ret)) {
+    ecrt_master_receive(master_);
+    ecrt_domain_process(domain_);
+    CheckoutDomainState();
+    CheckSalveConfigStates();
+    auto status = EC_READ_U16(process_data_ + user_data.status_word);
+    auto position = EC_READ_U32(process_data_ + user_data.position_value);
+    if (slave_configs_.at(0).sc_state.operational == 1) {
+      static bool first_boot = true;
+      if (first_boot) {
+        first_boot = false;
+        KAYLORDUT_LOG_INFO("write current position({}) to target position",
+                           position);
+        EC_WRITE_S32(process_data_ + user_data.target_position, position);
+      }
+      if (status & 0x0008) {
+        KAYLORDUT_LOG_INFO("current status: 0x{:04X}, control word --> 0x80",
+                           status);
+        // 清除电机报警
+        EC_WRITE_U16(process_data_ + user_data.control_word, 0x80);
+      } else {
+        if (status & 0x10) {
+          if ((status & 0x50) == 0x50) {
+            KAYLORDUT_LOG_INFO(
+                "current status: 0x{:04X}, control word --> 0x06", status);
+            EC_WRITE_U16(process_data_ + user_data.control_word, 0x06);
+          } else if ((status & 0x33) == 0x33) {
+            if ((status & 0x0F) == 0x07) {
+              static int count = 0;
+              count++;
+              KAYLORDUT_LOG_INFO("count = {}", count);
+              if (count == 100) {
+                KAYLORDUT_LOG_INFO("Initialization completed.");
+                ret = true;
+              }
+            } else {
+              KAYLORDUT_LOG_INFO(
+                  "current status: 0x{:04X}, control word --> 0x0F", status);
+              EC_WRITE_U16(process_data_ + user_data.control_word, 0x0F);
+            }
+          } else if ((status & 0x33) == 0x31) {
+            KAYLORDUT_LOG_INFO(
+                "current status: 0x{:04X}, control word --> 0x07", status);
+            EC_WRITE_U16(process_data_ + user_data.control_word, 0x07);
+          }
+        }
+      }
+    }
+    // send process data
+    ecrt_domain_queue(domain_);
+    ecrt_master_send(master_);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    KAYLORDUT_LOG_DEBUG("InitializeDevices() is Running");
+  }
+  return ret;
+}

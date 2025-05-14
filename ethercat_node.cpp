@@ -30,7 +30,7 @@ void EthercatNode::Initialize(const std::vector<SalveParam> salve_param,
                                        param.vendor_id, param.product_code))) {
       KAYLORDUT_LOG_ERROR(
           "Failed to get a slave configuration, alias: {}, position: {}, "
-          "vendor_id: {}, product_code: {}",
+          "vendor_id: 0x{:X}, product_code: 0x{:X}",
           param.alias, param.position, param.vendor_id, param.product_code);
       exit(EXIT_FAILURE);
     }

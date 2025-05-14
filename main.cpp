@@ -67,10 +67,10 @@ int main(int argc, const char *argv[]) {
   wakeup_time.tv_sec += 1; /* start in future */
   wakeup_time.tv_nsec = 0;
   int ret = 0;
-  App app;
+  App app(&running);
   app.Config();
   app.CheckMasterState();
-  app.CheckSalveConfigStates();
+  app.InitializeDevices();
   while (running) {
     ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, NULL);
     if (ret) {
@@ -78,7 +78,7 @@ int main(int argc, const char *argv[]) {
       break;
     }
     app.RunOnce();
-    wakeup_time.tv_nsec += PERIOD_NS *2;
+    wakeup_time.tv_nsec += PERIOD_NS;
     while (wakeup_time.tv_nsec >= NSEC_PER_SEC) {
       wakeup_time.tv_nsec -= NSEC_PER_SEC;
       wakeup_time.tv_sec++;
