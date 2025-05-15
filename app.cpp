@@ -23,20 +23,28 @@ struct PDO_offset {
   unsigned int offset_input_bit2;
 } user_data;
 
-#define ZERO_ERR_ALIAS_POSITION 0,1
+#define ZERO_ERR_ALIAS_POSITION 0, 1
 #define ZERO_ERR_VENDORID_PRODUCTCODE 0x5a65726f, 0x00029252
-#define MCU_ALIAS_POSITION 0,0
+#define MCU_ALIAS_POSITION 0, 0
 #define MCU_VENDORID_PRODUCTCODE 0x300077, 0x1
 
 const static ec_pdo_entry_reg_t pdo_entry_regs[] = {
-    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x607a, 0x00, &user_data.target_position},
-    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6040, 0x00, &user_data.control_word},
-    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6064, 0x00, &user_data.position_value},
-    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6041, 0x00, &user_data.status_word},
-    {MCU_ALIAS_POSITION,  MCU_VENDORID_PRODUCTCODE, 0x7000, 0x01, &user_data.output_bit1, &user_data.offset_output_bit1},
-    {MCU_ALIAS_POSITION,  MCU_VENDORID_PRODUCTCODE, 0x7000, 0x02, &user_data.output_bit2, &user_data.offset_output_bit2},
-    {MCU_ALIAS_POSITION,  MCU_VENDORID_PRODUCTCODE, 0x6000, 0x01, &user_data.input_bit1, &user_data.offset_input_bit1},
-    {MCU_ALIAS_POSITION,  MCU_VENDORID_PRODUCTCODE, 0x6000, 0x02, &user_data.input_bit2, &user_data.offset_input_bit2},
+    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x607a, 0x00,
+     &user_data.target_position},
+    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6040, 0x00,
+     &user_data.control_word},
+    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6064, 0x00,
+     &user_data.position_value},
+    {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6041, 0x00,
+     &user_data.status_word},
+    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x01,
+     &user_data.output_bit1, &user_data.offset_output_bit1},
+    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x02,
+     &user_data.output_bit2, &user_data.offset_output_bit2},
+    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x01,
+     &user_data.input_bit1, &user_data.offset_input_bit1},
+    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x02,
+     &user_data.input_bit2, &user_data.offset_input_bit2},
     {}};
 
 App::App(bool* running) { running_ = running; }
@@ -111,7 +119,8 @@ bool App::InitializeDevices() {
     auto status = EC_READ_U16(process_data_ + user_data.status_word);
     auto position = EC_READ_U32(process_data_ + user_data.position_value);
     /// 下面是配置电机周期位置模式初始化的流程
-    /// 1. 读取了当前的位置，写到目标位置（这是因为如果目标位置和初始位置相差太远的话，电机会
+    /// 1.
+    /// 读取了当前的位置，写到目标位置（这是因为如果目标位置和初始位置相差太远的话，电机会
     /// 直接报错）
     /// 2. 清除电机所有的错误
     /// 3. 使能电机 依次发送 0x06 0x07 0x0F
