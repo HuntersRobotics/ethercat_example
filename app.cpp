@@ -13,20 +13,20 @@ struct PDO_offset {
   unsigned int control_word;
   unsigned int position_value;
   unsigned int status_word;
-  unsigned int output_bit1;
-  unsigned int output_bit2;
-  unsigned int input_bit1;
-  unsigned int input_bit2;
-  unsigned int offset_output_bit1;
-  unsigned int offset_output_bit2;
-  unsigned int offset_input_bit1;
-  unsigned int offset_input_bit2;
+  // unsigned int output_bit1;
+  // unsigned int output_bit2;
+  // unsigned int input_bit1;
+  // unsigned int input_bit2;
+  // unsigned int offset_output_bit1;
+  // unsigned int offset_output_bit2;
+  // unsigned int offset_input_bit1;
+  // unsigned int offset_input_bit2;
 } user_data;
 
-#define ZERO_ERR_ALIAS_POSITION 0, 1
+#define ZERO_ERR_ALIAS_POSITION 0, 0
 #define ZERO_ERR_VENDORID_PRODUCTCODE 0x5a65726f, 0x00029252
-#define MCU_ALIAS_POSITION 0, 0
-#define MCU_VENDORID_PRODUCTCODE 0x300077, 0x1
+// #define MCU_ALIAS_POSITION 0, 0
+// #define MCU_VENDORID_PRODUCTCODE 0x300077, 0x1
 
 const static ec_pdo_entry_reg_t pdo_entry_regs[] = {
     {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x607a, 0x00,
@@ -37,14 +37,14 @@ const static ec_pdo_entry_reg_t pdo_entry_regs[] = {
      &user_data.position_value},
     {ZERO_ERR_ALIAS_POSITION, ZERO_ERR_VENDORID_PRODUCTCODE, 0x6041, 0x00,
      &user_data.status_word},
-    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x01,
-     &user_data.output_bit1, &user_data.offset_output_bit1},
-    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x02,
-     &user_data.output_bit2, &user_data.offset_output_bit2},
-    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x01,
-     &user_data.input_bit1, &user_data.offset_input_bit1},
-    {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x02,
-     &user_data.input_bit2, &user_data.offset_input_bit2},
+    // {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x01,
+    //  &user_data.output_bit1, &user_data.offset_output_bit1},
+    // {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x7000, 0x02,
+    //  &user_data.output_bit2, &user_data.offset_output_bit2},
+    // {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x01,
+    //  &user_data.input_bit1, &user_data.offset_input_bit1},
+    // {MCU_ALIAS_POSITION, MCU_VENDORID_PRODUCTCODE, 0x6000, 0x02,
+    //  &user_data.input_bit2, &user_data.offset_input_bit2},
     {}};
 
 App::App(bool* running) { running_ = running; }
@@ -56,15 +56,15 @@ void App::Config() {
   EthercatNode::SalveParam sample;
   // 这里从readme中的信息获取一下从站的各种信息并配置从站
   sample.alias = 0;
-  sample.position = 1;
+  sample.position = 0;
   sample.vendor_id = 0x5a65726f;
   sample.product_code = 0x29252;
   salve_param.push_back(sample);
-  sample.alias = 0;
-  sample.position = 0;
-  sample.vendor_id = 0x300077;
-  sample.product_code = 0x01;
-  salve_param.push_back(sample);
+  // sample.alias = 0;
+  // sample.position = 0;
+  // sample.vendor_id = 0x300077;
+  // sample.product_code = 0x01;
+  // salve_param.push_back(sample);
   // 这里只有一个master，所以index是0
   Initialize(salve_param, pdo_entry_regs, 0);
 }
@@ -76,15 +76,15 @@ void App::RunOnce() {
   // read process data
   auto status = EC_READ_U16(process_data_ + user_data.status_word);
   auto position = EC_READ_U32(process_data_ + user_data.position_value);
-  // 读取国民技术的IO的状态，同时把IO状态写到LED上去
-  uint8_t input1 = EC_READ_BIT(process_data_ + user_data.input_bit1,
-                               user_data.offset_input_bit1);
-  uint8_t input2 = EC_READ_BIT(process_data_ + user_data.input_bit2,
-                               user_data.offset_input_bit2);
-  EC_WRITE_BIT(process_data_ + user_data.output_bit1,
-               user_data.offset_output_bit1, input1);
-  EC_WRITE_BIT(process_data_ + user_data.output_bit2,
-               user_data.offset_output_bit2, input2);
+  // // 读取国民技术的IO的状态，同时把IO状态写到LED上去
+  // uint8_t input1 = EC_READ_BIT(process_data_ + user_data.input_bit1,
+  //                              user_data.offset_input_bit1);
+  // uint8_t input2 = EC_READ_BIT(process_data_ + user_data.input_bit2,
+  //                              user_data.offset_input_bit2);
+  // EC_WRITE_BIT(process_data_ + user_data.output_bit1,
+  //              user_data.offset_output_bit1, input1);
+  // EC_WRITE_BIT(process_data_ + user_data.output_bit2,
+  //              user_data.offset_output_bit2, input2);
   if (slave_configs_.at(0).sc_state.operational == 1 &&
       (status & 0x0F) == 0x07) {
     // 只有准备打开伺服 伺服使能
@@ -96,14 +96,14 @@ void App::RunOnce() {
     }
   }
 
-  static uint32_t num = 0;
-  if (num == 999) {
-    num = 0;
-    KAYLORDUT_LOG_INFO(
-        "status: 0x{:04X}, position value: {}, input1: {}, input2: {}", status,
-        position, input1, input2);
-  }
-  num++;
+  // static uint32_t num = 0;
+  // if (num == 999) {
+  //   num = 0;
+  //   KAYLORDUT_LOG_INFO(
+  //       "status: 0x{:04X}, position value: {}, input1: {}, input2: {}", status,
+  //       position, input1, input2);
+  // }
+  // num++;
   // send process data
   ecrt_domain_queue(domain_);
   ecrt_master_send(master_);
