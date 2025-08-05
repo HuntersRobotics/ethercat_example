@@ -1,3 +1,41 @@
+# AI Hunter Ethercat Demo
+## Install Driver and Application
+### Add My Private APT Repository  
+```bash
+cat << 'EOF' | sudo tee /etc/apt/sources.list.d/kaylordut.list 
+deb [arch=arm64 signed-by=/etc/apt/keyrings/kaylor-keyring.gpg] http://apt.kaylordut.cn/kaylordut/ kaylordut main
+EOF
+sudo mkdir /etc/apt/keyrings -pv
+sudo wget -O /etc/apt/keyrings/kaylor-keyring.gpg http://apt.kaylordut.cn/kaylor-keyring.gpg
+sudo apt update
+```
+### Check Kernel Version and Install Driver
+```bash
+╰─ uname -a                                                                                                                                ─╯
+Linux ai-hunter 6.1.43-rt14-rockchip-rk3588 #1.0.0 SMP PREEMPT_RT Fri Jul 25 16:37:54 CST 2025 aarch64 aarch64 aarch64 GNU/Linux
+
+╰─ apt policy ethercat-module                                                                                                              ─╯
+ethercat-module:
+  Installed: (none)
+  Candidate: 6.1.43-rt14-rockchip-rk3588
+  Version table:
+     6.1.43-rt14-rockchip-rk3588 500
+        500 http://apt.kaylordut.cn/kaylordut kaylordut/main arm64 Packages
+     5.10.160-rt89-rockchip-rk3588 500
+        500 http://apt.kaylordut.cn/kaylordut kaylordut/main arm64 Packages
+```
+```bash
+# !!!!!
+sudo apt install -y ethercat-module=6.1.43-rt14-rockchip-rk3588 # if kernel version is 6.1.43-rt14-rockchip-rk3588
+# !!!!!
+sudo apt install -y ethercat-module=5.10.160-rt89-rockchip-rk3588 # if kernel vesion is 5.10.160-rt89-rockchip-rk3588
+```
+> Pls notice kernel version 
+
+### Install Application
+```bash
+sudo apt install -y ethercat-master
+```
 
 ## Ethercat状态信息
 
