@@ -37,6 +37,27 @@ sudo apt install -y ethercat-module=5.10.160-rt89-rockchip-rk3588 # if kernel ve
 sudo apt install -y ethercat-master
 ```
 
+## Configure Ethercat Port
+### Test EC Driver
+```bash
+sudo modprobe r8169 # remove normal driver
+sudo modprobe ec_r8169 # add ec driver
+```
+### Get Port Information
+```bash
+sudo dmesg | grep ec_r8169 
+```
+![img.png](img.png)  
+> copy the mac address
+
+### Edit config
+Edit /etc/ethercat.conf
+```conf
+MASTER0_DEVICE="00:2d:47:c2:ce:4f"
+DEVICE_MODULES="r8169"
+UPDOWN_INTERFACES=""
+```
+
 ## Ethercat状态信息
 
 ```bash
