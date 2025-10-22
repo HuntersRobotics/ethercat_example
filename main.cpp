@@ -30,6 +30,7 @@ void stack_prefault(void) {
 }
 
 int main(int argc, const char *argv[]) {
+  //初始化
   std::string cmd;
   for (size_t i = 0; i < argc; i++) {
     cmd += " ";
@@ -67,10 +68,12 @@ int main(int argc, const char *argv[]) {
   wakeup_time.tv_sec += 1; /* start in future */
   wakeup_time.tv_nsec = 0;
   int ret = 0;
+
+  //创建ETHEAECAT应用对象APP
   App app(&running);
   app.Config();
   app.CheckMasterState();
-  app.InitializeDevices();
+  // app.InitializeDevices();
   while (running) {
     ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, NULL);
     if (ret) {

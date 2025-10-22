@@ -13,16 +13,19 @@ EthercatNode::~EthercatNode() {}
 void EthercatNode::Initialize(const std::vector<SalveParam> salve_param,
                               const ec_pdo_entry_reg_t* regs,
                               unsigned int master_index) {
+  //请求master
   master_ = ecrt_request_master(0);
   if (!master_) {
     KAYLORDUT_LOG_ERROR("Failed to request master of EthercatNode");
     exit(EXIT_FAILURE);
   }
+  // Domain 是 PDO（Process Data Object）的容器
   domain_ = ecrt_master_create_domain(master_);
   if (!domain_) {
     KAYLORDUT_LOG_ERROR("Failed to create domain of EthercatNode");
     exit(EXIT_FAILURE);
   }
+  //遍历传入从站的信息
   for (const auto& param : salve_param) {
     EcSlaveConfig config;
     if (!(config.sc =
@@ -40,16 +43,20 @@ void EthercatNode::Initialize(const std::vector<SalveParam> salve_param,
     config.product_code = param.product_code;
     slave_configs_.push_back(config);
   }
+  //将传入的 PDO 映射表 regs 保存到类成员。使用 ecrt_domain_reg_pdo_entry_list
+  //注册到 Domain
   pdo_entry_regs_ = regs;
   if (ecrt_domain_reg_pdo_entry_list(domain_, pdo_entry_regs_)) {
     KAYLORDUT_LOG_ERROR("Failed to register pdo entry list");
     exit(EXIT_FAILURE);
   }
+  // Activating master
   KAYLORDUT_LOG_INFO("Activating master...");
   if (ecrt_master_activate(master_)) {
     KAYLORDUT_LOG_ERROR("Failed to activate master");
     exit(EXIT_FAILURE);
   }
+  //获取 Domain 数据指针
   if (!(process_data_ = ecrt_domain_data(domain_))) {
     KAYLORDUT_LOG_ERROR("Failed to get domain data");
     exit(EXIT_FAILURE);
@@ -58,8 +65,8 @@ void EthercatNode::Initialize(const std::vector<SalveParam> salve_param,
 }
 
 void EthercatNode::CheckMasterState() {
-  ec_master_state_t ms;
-  ecrt_master_state(master_, &ms);
+  ec_master_state_t ms;             // ms用来存储状态
+  ecrt_master_state(master_, &ms);  //获取状态赋值给ms
   if (ms.slaves_responding != master_state_.slaves_responding) {
     KAYLORDUT_LOG_INFO("{} slave(s).", ms.slaves_responding);
   }
