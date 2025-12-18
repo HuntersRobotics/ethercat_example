@@ -7,7 +7,7 @@
 #include "app.h"
 #include "string"
 
-#define PERIOD_NS (1000000)
+#define PERIOD_NS (10*1000000)
 
 #define MAX_SAFE_STACK                          \
   (8 * 1024) /* The maximum stack size which is \
@@ -70,7 +70,7 @@ int main(int argc, const char *argv[]) {
   App app(&running);
   app.Config();
   app.CheckMasterState();
-  app.InitializeDevices();
+  // app.InitializeDevices();
   while (running) {
     ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeup_time, NULL);
     if (ret) {
