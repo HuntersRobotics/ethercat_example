@@ -40,7 +40,7 @@ sudo apt install -y ethercat-master
 ## Configure Ethercat Port
 ### Test EC Driver
 ```bash
-sudo modprobe r8169 # remove normal driver
+sudo modprobe -r r8169 # remove normal driver
 sudo modprobe ec_r8169 # add ec driver
 ```
 ### Get Port Information
