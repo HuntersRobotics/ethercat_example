@@ -1,3 +1,12 @@
 cmake-build-*/
 .idea/
 .vscode/
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.out
+motor_continuous
+test_dc_scan
+ethercat_example
