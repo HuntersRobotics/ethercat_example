@@ -17,6 +17,7 @@ debian/.debhelper/
 debian/motor-continuous/
 debian/motor-continuous.substvars
 debian/*.debhelper
+debian/*.log
 debian/files
 debian/debhelper-build-stamp
 *.deb
