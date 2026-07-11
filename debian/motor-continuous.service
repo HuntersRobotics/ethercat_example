@@ -6,6 +6,8 @@ After=ethercat.service network.target
 
 [Service]
 Type=simple
+Environment=SPDLOG_SYSTEMD=true
+Environment=SPDLOG_STDOUT=false
 ExecStart=/usr/bin/motor_continuous 0 /etc/motor-continuous/config.yaml
 Restart=on-failure
 RestartSec=2
