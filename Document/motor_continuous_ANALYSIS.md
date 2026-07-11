@@ -16,7 +16,7 @@
 
 ## 2. 程序流程图
 
-![motor_continuous 程序流程图](../flowchart.png)
+![motor_continuous 程序流程图](flowchart.png)
 
 程序分为三个阶段：**初始化（浅蓝）→ 主循环（浅橙）→ 清理（浅灰）**。
 
@@ -145,7 +145,7 @@ StackPrefault();                           // 3. 预先触发栈页错误
 | 文件 | 说明 |
 |------|------|
 | `motor_continuous.cpp` | 程序源码 |
-| `flowchart.dot` | 流程图 Graphviz 源文件 |
-| `flowchart.png` | 流程图渲染图片 |
+| `Document/flowchart.dot` | 流程图 Graphviz 源文件 |
+| `Document/flowchart.png` | 流程图渲染图片 |
 | `readme.md` | 编译/运行说明 |
 | `Document/motor_continuous_ANALYSIS.md` | 本分析文档 |
