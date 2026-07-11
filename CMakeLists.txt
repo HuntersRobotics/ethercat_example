@@ -17,3 +17,9 @@ target_link_libraries(test_dc_scan ethercat)
 # Motor continuous rotation test - position + 100 each cycle
 add_executable(motor_continuous motor_continuous.cpp)
 target_link_libraries(motor_continuous ethercat ${kaylordut_LIBS} yaml-cpp)
+
+# ===== 安装规则（Debian 打包用）=====
+include(GNUInstallDirs)
+install(TARGETS motor_continuous RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES Config/motor_continuous.yaml
+        DESTINATION /etc/motor-continuous RENAME config.yaml)

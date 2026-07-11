@@ -1,0 +1,14 @@
+Source: motor-continuous
+Section: utils
+Priority: optional
+Maintainer: kaylorchen <kaylor.chen@qq.com>
+Build-Depends: debhelper (>= 12~), cmake (>= 3.22~),
+ kaylordut-dev, libyaml-cpp-dev
+Standards-Version: 4.5.0
+Homepage: https://shenzhen.kaylordut.com:13000/HuntersRobotics/ethercat_example
+
+Package: motor-continuous
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ethercat-master
+Description: EtherCAT motor continuous rotation test (Renesas RA8T2)
+ CSP+DC driven motor test configured by YAML, supports 1~N slaves.

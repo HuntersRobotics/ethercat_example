@@ -175,3 +175,32 @@ slaves:
 - **Status**：`Rdy`(Ready) `On`(Switched On) `Ena`(Enabled) `Flt`(Fault) `Vol`(Voltage) `Dis`(Disabled) `Tgt`(Target Reached) `Ign`(Ignoring Target)
 
 从站到达各自往返边界（±`travel_limit`）方向切换时，打印一条 `[WARN]` 日志。
+
+## 打包成 Debian 包
+
+把 motor_continuous 打成 Debian 包，含 systemd service（**默认 enabled，开机自启**）。
+
+### 打包
+
+```bash
+sudo apt install -y debhelper       # 打包工具 (>= 12)
+dpkg-buildpackage -us -uc -b         # 生成 ../motor-continuous_1.0.0_arm64.deb
+```
+
+> 前置：IgH EtherCAT master 需手动源码安装（提供 `ecrt.h` / `libethercat`），不通过 apt。
+
+### 安装与 service 管理
+
+```bash
+sudo dpkg -i ../motor-continuous_1.0.0_arm64.deb
+sudo systemctl status motor-continuous      # 查看状态（默认 enabled + 启动）
+sudo systemctl restart motor-continuous     # 改配置后重启
+sudo systemctl disable motor-continuous     # 取消开机自启
+```
+
+安装后：
+- 二进制：`/usr/bin/motor_continuous`
+- 配置：`/etc/motor-continuous/config.yaml`（conffile，升级保留改动）
+- service：`/lib/systemd/system/motor-continuous.service`（`Requires=ethercat.service`）
+
+service 默认 `duration 0`（无限运行），配置用 `/etc/motor-continuous/config.yaml`。改配置后 `systemctl restart` 生效。

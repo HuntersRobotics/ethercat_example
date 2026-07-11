@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+# libethercat 手动源码安装 (非 dpkg 包)，忽略其依赖信息缺失
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info

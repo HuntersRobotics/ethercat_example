@@ -1,0 +1,14 @@
+[Unit]
+Description=Motor Continuous EtherCAT Test (Renesas RA8T2 CSP)
+Documentation=https://shenzhen.kaylordut.com:13000/HuntersRobotics/ethercat_example
+Requires=ethercat.service
+After=ethercat.service network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/motor_continuous 0 /etc/motor-continuous/config.yaml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

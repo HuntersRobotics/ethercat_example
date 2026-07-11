@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -160,8 +161,15 @@ int main(int argc, char** argv) {
   // 解析参数：duration_ms (0=无限) + 可选 config_path
   int32_t duration_ms = 10000;
   if (argc >= 2) duration_ms = atoi(argv[1]);
-  std::string config_path = "Config/motor_continuous.yaml";
-  if (argc >= 3) config_path = argv[2];
+  std::string config_path;
+  if (argc >= 3) {
+    config_path = argv[2];
+  } else {
+    // 默认查找：开发环境 Config/motor_continuous.yaml，找不到用生产环境 /etc/
+    std::ifstream test("Config/motor_continuous.yaml");
+    config_path = test.good() ? "Config/motor_continuous.yaml"
+                              : "/etc/motor-continuous/config.yaml";
+  }
 
   // 注册信号处理器（用于 Ctrl+C 退出）
   signal(SIGINT, OnSignal);

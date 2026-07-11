@@ -10,3 +10,14 @@ Makefile
 motor_continuous
 test_dc_scan
 ethercat_example
+
+# Debian 打包产物
+obj-*/
+debian/.debhelper/
+debian/motor-continuous/
+debian/motor-continuous.substvars
+debian/*.debhelper
+debian/files
+debian/debhelper-build-stamp
+*.deb
+*.ddeb

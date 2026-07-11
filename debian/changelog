@@ -1,0 +1,7 @@
+motor-continuous (1.0.0) unstable; urgency=medium
+
+  * Initial package: EtherCAT motor continuous rotation test
+    (Renesas RA8T2 CiA402, CSP+DC, YAML config, multi-slave)
+  * Bundles systemd service (default enabled) requiring ethercat.service
+
+ -- kaylorchen <kaylor.chen@qq.com>  Sat, 11 Jul 2026 17:20:35 +0800
