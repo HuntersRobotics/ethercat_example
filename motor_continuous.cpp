@@ -49,14 +49,16 @@ static void StackPrefault() {
 }
 
 struct PdoOffset {
-  unsigned int target_position;
-  unsigned int control_word;
-  unsigned int position_actual;
-  unsigned int status_word;
+  uint32_t target_position;
+  uint32_t control_word;
+  uint32_t position_actual;
+  uint32_t status_word;
+  uint32_t velocity_actual;
+  uint32_t torque_actual;
 };
 
 // 位置限位
-static const int32_t kSafetyTravelLimit = 1000000;  // 位置往返边界 (±100万)
+static const int32_t kSafetyTravelLimit = 10000;  // 位置往返边界 (±1万)
 
 // AL state 字符串映射
 std::string AlStateToString(uint8_t al_state) {
@@ -87,7 +89,7 @@ std::string StatusToString(uint16_t status) {
 
 int main(int argc, char** argv) {
   // 解析超时时间参数（0 = 无限运行）
-  int duration_ms = 10000;  // 默认 10 秒
+  int32_t duration_ms = 10000;  // 默认 10 秒
   if (argc >= 2) duration_ms = atoi(argv[1]);
 
   // 注册信号处理器（用于 Ctrl+C 退出）
@@ -142,6 +144,8 @@ int main(int argc, char** argv) {
       {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6040, 0x00, &off.control_word},
       {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6064, 0x00, &off.position_actual},
       {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6041, 0x00, &off.status_word},
+      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x606c, 0x00, &off.velocity_actual},
+      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6077, 0x00, &off.torque_actual},
       {}};
   if (ecrt_domain_reg_pdo_entry_list(domain, regs)) {
     KAYLORDUT_LOG_ERROR("[FATAL] register PDO entries 失败");
@@ -189,14 +193,14 @@ int main(int argc, char** argv) {
   int32_t initial_pos = 0;
   int32_t min_pos = 0;
   int32_t max_pos = 0;
-  int direction = 1;       // 移动方向: 1=正向(+100), -1=反向(-100)
-  int last_direction = 1;  // 上次方向（用于检测切换）
+  int32_t direction = 1;       // 移动方向: 1=正向(+100), -1=反向(-100)
+  int32_t last_direction = 1;  // 上次方向（用于检测切换）
   uint16_t final_status = 0;
   uint16_t final_al_state = 0;
-  int fault_reset_toggle = 0;
+  int32_t fault_reset_toggle = 0;
 
-  const int total_iters = duration_ms + 2000;  // 多给 2s 状态机初始化
-  int iter = 0;
+  const int32_t total_iters = duration_ms + 2000;  // 多给 2s 状态机初始化
+  int32_t iter = 0;
   bool infinite_mode = (duration_ms == 0);  // 无限模式标志
 
   KAYLORDUT_LOG_INFO("========== 开始周期循环 ==========");
@@ -214,7 +218,9 @@ int main(int argc, char** argv) {
 
     // 读取状态和位置
     uint16_t status = EC_READ_U16(pd + off.status_word);
-    int32_t  pos    = EC_READ_S32(pd + off.position_actual);
+    int32_t  pos = EC_READ_S32(pd + off.position_actual);
+    int32_t  vel = EC_READ_S32(pd + off.velocity_actual);  // 实际速度
+    int16_t  tor = EC_READ_S16(pd + off.torque_actual);    // 实际扭矩 (单位 0.001 Nm)
     final_status = status;
 
     // 检查从站状态
@@ -291,8 +297,8 @@ int main(int argc, char** argv) {
       std::string al_str = AlStateToString(al_state);
       std::string status_str = StatusToString(status);
       const char* dir_str = (direction > 0) ? "↑" : "↓";  // 方向指示
-      KAYLORDUT_LOG_INFO("[t={:5}ms] AL={} Status=[{}] pos={} target={} {}{}{}",
-                iter, al_str, status_str, pos, target, dir_str,
+      KAYLORDUT_LOG_INFO("[t={:5}ms] AL={} Status=[{}] pos={} target={} vel={} tor={} {}{}{}",
+                iter, al_str, status_str, pos, target, vel, tor, dir_str,
                 enabled ? " ENABLED" : "",
                 fault_seen ? " FAULT" : "");
     }
