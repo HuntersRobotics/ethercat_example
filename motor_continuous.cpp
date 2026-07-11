@@ -1,21 +1,24 @@
 //
-// motor_continuous - Renesas RA8T2 CiA402 电机持续转动测试程序
+// motor_continuous - Renesas RA8T2 CiA402 电机持续转动测试程序（多从站 + YAML 配置）
 // Copyright (c) 2026 kaylorchen
 // SPDX-License-Identifier: TBD
 //
 // 用法:
-//   motor_continuous <duration_ms>
-//   例: motor_continuous 10000    (运行 10 秒)
-//       motor_continuous 0         (无限运行，Ctrl+C 退出)
+//   motor_continuous <duration_ms> [config_path]
+//   例: motor_continuous 0                          (无限运行，Ctrl+C 退出)
+//       motor_continuous 10000                       (运行 10 秒)
+//       motor_continuous 0 Config/motor_continuous.yaml
 //
 // 功能:
-//   - 硬件: Renesas EtherCAT RA8T2 CiA402 (Vendor 0x00000766, Product 0x00000802)
-//   - DC 激活码 0x0301, 1ms 周期 (1000Hz), CSP 模式
-//   - 目标策略: 在 ±100万 边界往返 (每周期 ±100)
+//   - 通过 YAML 配置文件管理参数，支持 1~N 个从站
+//   - 每个从站独立的运动参数 (step / travel_limit)
+//   - DC 激活码、CSP 模式、周期均可配置
+//   - 目标策略: 每个从站在 ±travel_limit 边界之间往返
 //   - 实时调度 SCHED_FIFO (需 sudo)
 //
 
 #include <ecrt.h>
+#include <yaml-cpp/yaml.h>
 
 #include <sched.h>
 #include <sys/mman.h>
@@ -27,15 +30,10 @@
 #include <cstdlib>
 #include <ctime>
 #include <string>
+#include <vector>
 
 #include "kaylordut/log/logger.h"
 
-// 固定配置 - 宏定义
-#define ASSIGN_ACTIVATE 0x0301      // DC 激活码（已验证能让电机转动）
-#define CYCLE_NS 1000000            // 1ms 周期 = 1000Hz
-#define VENDOR_ID    0x00000766u
-#define PRODUCT_CODE 0x00000802u
-#define SLAVE_POS    0
 #define NSEC_PER_SEC 1000000000L
 
 static bool g_running = true;
@@ -48,17 +46,88 @@ static void StackPrefault() {
   memset(dummy, 0, MAX_SAFE_STACK);
 }
 
-struct PdoOffset {
-  uint32_t target_position;
-  uint32_t control_word;
-  uint32_t position_actual;
-  uint32_t status_word;
-  uint32_t velocity_actual;
-  uint32_t torque_actual;
+// ===== 配置结构（从 YAML 读取）=====
+struct GlobalConfig {
+  int32_t cycle_ns;          // 周期 (ns)
+  int32_t assign_activate;   // DC 激活码
+  int32_t mode_of_operation; // 0x6060 模式 (8=CSP)
+  int32_t print_interval;    // 每多少周期打印一次
 };
 
-// 位置限位
-static const int32_t kSafetyTravelLimit = 10000;  // 位置往返边界 (±1万)
+struct SlaveConfig {
+  std::string name;
+  uint16_t alias = 0;
+  uint16_t position = 0;
+  uint32_t vendor_id = 0;
+  uint32_t product_code = 0;
+  int32_t step = 100;            // 每周期步进量
+  int32_t travel_limit = 10000;  // 往返边界 (±)
+};
+
+// ===== 从站运行时状态 =====
+struct SlaveRuntime {
+  SlaveConfig cfg;
+  ec_slave_config_t* sc = nullptr;
+  // PDO 偏移（每从站一组）
+  uint32_t off_target_position = 0;
+  uint32_t off_control_word = 0;
+  uint32_t off_position_actual = 0;
+  uint32_t off_status_word = 0;
+  uint32_t off_velocity_actual = 0;
+  uint32_t off_torque_actual = 0;
+  // 运行时状态
+  bool enabled = false;
+  bool initial_pos_recorded = false;
+  int32_t direction = 1;
+  int32_t last_direction = 1;
+  int32_t fault_reset_toggle = 0;
+  int32_t initial_pos = 0;
+  int32_t min_pos = 0;
+  int32_t max_pos = 0;
+  uint16_t final_status = 0;
+  uint8_t final_al_state = 0;
+};
+
+// 读取 YAML 配置。失败返回 false (fail loud)。
+bool LoadConfig(const std::string& path, GlobalConfig& g,
+                std::vector<SlaveConfig>& slaves) {
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(path);
+  } catch (const std::exception& e) {
+    KAYLORDUT_LOG_ERROR("无法读取配置文件 {}: {}", path, e.what());
+    return false;
+  }
+  try {
+    g.cycle_ns = root["cycle_ns"].as<int32_t>();
+    g.assign_activate = root["assign_activate"].as<int32_t>();
+    g.mode_of_operation = root["mode_of_operation"].as<int32_t>();
+    g.print_interval = root["print_interval"].as<int32_t>();
+    for (const auto& s : root["slaves"]) {
+      SlaveConfig sc;
+      sc.name = s["name"].as<std::string>();
+      sc.alias = s["alias"].as<uint16_t>();
+      sc.position = s["position"].as<uint16_t>();
+      sc.vendor_id = s["vendor_id"].as<uint32_t>();
+      sc.product_code = s["product_code"].as<uint32_t>();
+      sc.step = s["step"].as<int32_t>();
+      sc.travel_limit = s["travel_limit"].as<int32_t>();
+      slaves.push_back(sc);
+    }
+  } catch (const std::exception& e) {
+    KAYLORDUT_LOG_ERROR("解析配置失败 (检查字段是否完整/类型正确): {}", e.what());
+    return false;
+  }
+  if (slaves.empty()) {
+    KAYLORDUT_LOG_ERROR("配置中没有从站 (slaves 列表为空)");
+    return false;
+  }
+  if (g.cycle_ns <= 0 || g.print_interval <= 0) {
+    KAYLORDUT_LOG_ERROR("cycle_ns 和 print_interval 必须为正数");
+    return false;
+  }
+  return true;
+}
 
 // AL state 字符串映射
 std::string AlStateToString(uint8_t al_state) {
@@ -75,22 +144,24 @@ std::string AlStateToString(uint8_t al_state) {
 // Status word 字符串解析（合理缩写）
 std::string StatusToString(uint16_t status) {
   std::string result;
-  if (status & 0x0001) result += "Rdy ";      // Ready
-  if (status & 0x0002) result += "On ";        // Switched On
-  if (status & 0x0004) result += "Ena ";      // Enabled
-  if (status & 0x0008) result += "Flt ";      // Fault
-  if (status & 0x0010) result += "Vol ";      // Voltage Enabled
-  if (status & 0x0040) result += "Dis ";      // Disabled
-  if (status & 0x0100) result += "Tgt ";      // Target Reached
-  if ((status >> 12) & 1) result += "Ign ";    // Ignoring Target
+  if (status & 0x0001) result += "Rdy ";
+  if (status & 0x0002) result += "On ";
+  if (status & 0x0004) result += "Ena ";
+  if (status & 0x0008) result += "Flt ";
+  if (status & 0x0010) result += "Vol ";
+  if (status & 0x0040) result += "Dis ";
+  if (status & 0x0100) result += "Tgt ";
+  if ((status >> 12) & 1) result += "Ign ";
   if (result.empty()) result = "Idle";
   return result;
 }
 
 int main(int argc, char** argv) {
-  // 解析超时时间参数（0 = 无限运行）
-  int32_t duration_ms = 10000;  // 默认 10 秒
+  // 解析参数：duration_ms (0=无限) + 可选 config_path
+  int32_t duration_ms = 10000;
   if (argc >= 2) duration_ms = atoi(argv[1]);
+  std::string config_path = "Config/motor_continuous.yaml";
+  if (argc >= 3) config_path = argv[2];
 
   // 注册信号处理器（用于 Ctrl+C 退出）
   signal(SIGINT, OnSignal);
@@ -111,16 +182,29 @@ int main(int argc, char** argv) {
 
   setvbuf(stdout, nullptr, _IONBF, 0);  // 无缓冲输出
 
+  // 读取配置
+  GlobalConfig gcfg;
+  std::vector<SlaveConfig> slave_cfgs;
+  if (!LoadConfig(config_path, gcfg, slave_cfgs)) {
+    return 1;
+  }
+
   KAYLORDUT_LOG_INFO("========== Renesas RA8T2 电机持续转动测试 ==========");
-  KAYLORDUT_LOG_INFO("配置参数:");
-  KAYLORDUT_LOG_INFO("  DC 激活码: 0x{:X}", ASSIGN_ACTIVATE);
-  KAYLORDUT_LOG_INFO("  周期: {} ns ({} ms = {} Hz)", CYCLE_NS, CYCLE_NS/1000000, 1000000000/CYCLE_NS);
+  KAYLORDUT_LOG_INFO("配置文件: {}", config_path);
+  KAYLORDUT_LOG_INFO("  从站数量: {}", slave_cfgs.size());
+  KAYLORDUT_LOG_INFO("  周期: {} ns ({} Hz)", gcfg.cycle_ns, NSEC_PER_SEC / gcfg.cycle_ns);
+  KAYLORDUT_LOG_INFO("  DC 激活码: 0x{:X}", gcfg.assign_activate);
+  KAYLORDUT_LOG_INFO("  CSP 模式 (0x6060): {}", gcfg.mode_of_operation);
   if (duration_ms == 0) {
     KAYLORDUT_LOG_INFO("  超时时间: 无限 (按 Ctrl+C 退出)");
   } else {
     KAYLORDUT_LOG_INFO("  超时时间: {} ms", duration_ms);
   }
-  KAYLORDUT_LOG_INFO("  目标策略: 在 ±{} 之间往返 (每循环 ±100)", kSafetyTravelLimit);
+  for (const auto& sc : slave_cfgs) {
+    KAYLORDUT_LOG_INFO("  [{}] alias={} pos={} vid=0x{:06X} pid=0x{:04X} step={} ±{}",
+              sc.name, sc.alias, sc.position, sc.vendor_id, sc.product_code,
+              sc.step, sc.travel_limit);
+  }
   KAYLORDUT_LOG_INFO("");
   KAYLORDUT_LOG_INFO("状态缩写说明:");
   KAYLORDUT_LOG_INFO("  AL状态: INIT, PREOP, SAFEOP, OP");
@@ -133,41 +217,55 @@ int main(int argc, char** argv) {
   if (!master) { KAYLORDUT_LOG_ERROR("[FATAL] request master 失败"); return 2; }
   ec_domain_t* domain = ecrt_master_create_domain(master);
   if (!domain) { KAYLORDUT_LOG_ERROR("[FATAL] create domain 失败"); return 2; }
-  ec_slave_config_t* sc =
-      ecrt_master_slave_config(master, 0, 0, VENDOR_ID, PRODUCT_CODE);
-  if (!sc) { KAYLORDUT_LOG_ERROR("[FATAL] slave config 失败"); return 2; }
 
-  // PDO 配置
-  PdoOffset off{};
-  ec_pdo_entry_reg_t regs[] = {
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x607a, 0x00, &off.target_position},
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6040, 0x00, &off.control_word},
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6064, 0x00, &off.position_actual},
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6041, 0x00, &off.status_word},
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x606c, 0x00, &off.velocity_actual},
-      {0, 0, VENDOR_ID, PRODUCT_CODE, 0x6077, 0x00, &off.torque_actual},
-      {}};
-  if (ecrt_domain_reg_pdo_entry_list(domain, regs)) {
+  // 准备运行时从站
+  std::vector<SlaveRuntime> slaves(slave_cfgs.size());
+  for (size_t i = 0; i < slave_cfgs.size(); ++i) {
+    slaves[i].cfg = slave_cfgs[i];
+  }
+
+  // slave_config + 收集 PDO 注册项
+  std::vector<ec_pdo_entry_reg_t> regs;
+  regs.reserve(slaves.size() * 6 + 1);
+  for (auto& sl : slaves) {
+    sl.sc = ecrt_master_slave_config(master, sl.cfg.alias, sl.cfg.position,
+                                     sl.cfg.vendor_id, sl.cfg.product_code);
+    if (!sl.sc) {
+      KAYLORDUT_LOG_ERROR("[FATAL] [{}] slave_config 失败", sl.cfg.name);
+      return 2;
+    }
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x607a, 0x00, &sl.off_target_position});
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x6040, 0x00, &sl.off_control_word});
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x6064, 0x00, &sl.off_position_actual});
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x6041, 0x00, &sl.off_status_word});
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x606c, 0x00, &sl.off_velocity_actual});
+    regs.push_back({sl.cfg.alias, sl.cfg.position, sl.cfg.vendor_id, sl.cfg.product_code,
+                    0x6077, 0x00, &sl.off_torque_actual});
+  }
+  regs.push_back({});  // 结束符
+  if (ecrt_domain_reg_pdo_entry_list(domain, regs.data())) {
     KAYLORDUT_LOG_ERROR("[FATAL] register PDO entries 失败");
     return 2;
   }
 
-  // 设置 CSP 模式
-  if (ecrt_slave_config_sdo8(sc, 0x6060, 0x00, 8)) {
-    KAYLORDUT_LOG_WARN("设置 0x6060 (CSP) 失败");
+  // CSP 模式 + DC 配置（每个从站都启用 DC）
+  for (auto& sl : slaves) {
+    if (ecrt_slave_config_sdo8(sl.sc, 0x6060, 0x00, gcfg.mode_of_operation)) {
+      KAYLORDUT_LOG_WARN("[{}] 设置 0x6060 (CSP) 失败", sl.cfg.name);
+    }
+    ecrt_slave_config_dc(sl.sc, gcfg.assign_activate, gcfg.cycle_ns, 0, 0, 0);
   }
-
-  // 配置 DC (使用固定激活码)
-  KAYLORDUT_LOG_INFO("配置 DC: ecrt_slave_config_dc(0x{:X}, {} ns)", ASSIGN_ACTIVATE, CYCLE_NS);
-  ecrt_slave_config_dc(sc, ASSIGN_ACTIVATE, CYCLE_NS, 0, 0, 0);
 
   // 激活 Master
   if (ecrt_master_activate(master)) {
     KAYLORDUT_LOG_ERROR("[FATAL] activate master 失败");
     return 2;
   }
-
-  // 获取数据指针
   uint8_t* pd = ecrt_domain_data(domain);
   if (!pd) { KAYLORDUT_LOG_ERROR("[FATAL] get domain data 失败"); return 2; }
 
@@ -185,23 +283,11 @@ int main(int argc, char** argv) {
   next.tv_sec += 1;
   next.tv_nsec = 0;
 
-  // 状态变量
-  bool enabled = false;
   bool op_reached = false;
   bool fault_seen = false;
-  bool initial_pos_recorded = false;  // 是否已记录初始位置
-  int32_t initial_pos = 0;
-  int32_t min_pos = 0;
-  int32_t max_pos = 0;
-  int32_t direction = 1;       // 移动方向: 1=正向(+100), -1=反向(-100)
-  int32_t last_direction = 1;  // 上次方向（用于检测切换）
-  uint16_t final_status = 0;
-  uint16_t final_al_state = 0;
-  int32_t fault_reset_toggle = 0;
-
   const int32_t total_iters = duration_ms + 2000;  // 多给 2s 状态机初始化
   int32_t iter = 0;
-  bool infinite_mode = (duration_ms == 0);  // 无限模式标志
+  bool infinite_mode = (duration_ms == 0);
 
   KAYLORDUT_LOG_INFO("========== 开始周期循环 ==========");
   if (infinite_mode) {
@@ -209,168 +295,143 @@ int main(int argc, char** argv) {
   }
 
   while (g_running && (infinite_mode || iter < total_iters)) {
-    // 等待下一个周期时间点
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
 
-    // 接收并处理 PDO
     ecrt_master_receive(master);
     ecrt_domain_process(domain);
 
-    // 读取状态和位置
-    uint16_t status = EC_READ_U16(pd + off.status_word);
-    int32_t  pos = EC_READ_S32(pd + off.position_actual);
-    int32_t  vel = EC_READ_S32(pd + off.velocity_actual);  // 实际速度
-    int16_t  tor = EC_READ_S16(pd + off.torque_actual);    // 实际扭矩 (单位 0.001 Nm)
-    final_status = status;
+    bool do_print = (iter % gcfg.print_interval == 0);
 
-    // 检查从站状态
-    ec_slave_config_state_t s;
-    ecrt_slave_config_state(sc, &s);
-    final_al_state = s.al_state;
-    if (s.al_state == 8) op_reached = true;
-    if (status & 0x0008) fault_seen = true;
+    // 遍历每个从站
+    for (auto& sl : slaves) {
+      uint16_t status = EC_READ_U16(pd + sl.off_status_word);
+      int32_t  pos = EC_READ_S32(pd + sl.off_position_actual);
+      int32_t  vel = EC_READ_S32(pd + sl.off_velocity_actual);
+      int16_t  tor = EC_READ_S16(pd + sl.off_torque_actual);
+      sl.final_status = status;
 
-    // 完整的状态机处理（CiA402）
-    uint16_t low = status & 0x6f;
-    uint16_t ctrl;
+      ec_slave_config_state_t s;
+      ecrt_slave_config_state(sl.sc, &s);
+      sl.final_al_state = s.al_state;
+      if (s.al_state == 8) op_reached = true;
+      if (status & 0x0008) fault_seen = true;
 
-    if (low == 0x40) {
-      ctrl = 0x06;             // Switch on disabled → Shutdown
-    } else if (low == 0x21 || low == 0x23 || low == 0x33) {
-      ctrl = 0x0F;             // Ready/Switched on → Enable operation
-    } else if (low == 0x27 || low == 0x37) {
-      ctrl = 0x0F;             // Operation enabled
-    } else {
-      ctrl = 0x0F;
-    }
-    // 使能状态实时跟随 status（掉状态时自动回退为 false）
-    enabled = (low == 0x27 || low == 0x37);
-
-    if (status & 0x0008) {     // Fault: 交替写 fault reset / shutdown
-      ctrl = (fault_reset_toggle++ % 2) ? 0x06 : 0x80;
-    }
-
-    // 目标策略：在 ±100万 之间往返（三角波）
-    int32_t target;
-    if (!enabled) {
-      // 未使能时：跟随当前位置
-      target = pos;
-    } else {
-      // **往返策略：到达边界后反向**
-      // 位置 >= +100万 → 反向减100
-      // 位置 <= -100万 → 正向加100
-      if (pos >= kSafetyTravelLimit) {
-        direction = -1;  // 到达上限，反向
-      } else if (pos <= -kSafetyTravelLimit) {
-        direction = 1;   // 到达下限，正向
-      }
-
-      // 方向切换时打 warning（只在切换瞬间，避免刷屏）
-      if (direction != last_direction) {
-        KAYLORDUT_LOG_WARN("到达位置限位! pos={} 方向切换: {} -> {}",
-                   pos,
-                   last_direction > 0 ? "+100" : "-100",
-                   direction > 0 ? "+100" : "-100");
-        last_direction = direction;
-      }
-      target = pos + direction * 100;  // 按当前方向移动100
-
-      // 更新统计（只在使能后统计）
-      if (!initial_pos_recorded) {
-        // 第一次使能时记录初始位置 - 这才是真正的开始！
-        initial_pos = pos;
-        min_pos = max_pos = pos;
-        initial_pos_recorded = true;
-        last_direction = direction;  // 初始化方向记录
-        KAYLORDUT_LOG_INFO("电机使能! 初始位置: {}, 往返范围: [{} ~ {}]",
-                   initial_pos, -kSafetyTravelLimit, kSafetyTravelLimit);
+      // CiA402 状态机
+      uint16_t low = status & 0x6f;
+      uint16_t ctrl;
+      if (low == 0x40) {
+        ctrl = 0x06;
+      } else if (low == 0x21 || low == 0x23 || low == 0x33) {
+        ctrl = 0x0F;
+      } else if (low == 0x27 || low == 0x37) {
+        ctrl = 0x0F;
       } else {
-        // 后续位置更新（只在这里统计，避免在未使能时统计）
-        if (pos > max_pos) max_pos = pos;
-        if (pos < min_pos) min_pos = pos;
+        ctrl = 0x0F;
       }
+      sl.enabled = (low == 0x27 || low == 0x37);
+
+      if (status & 0x0008) {  // Fault: 交替 fault reset / shutdown
+        ctrl = (sl.fault_reset_toggle++ % 2) ? 0x06 : 0x80;
+      }
+
+      // 目标策略：往返 ±travel_limit
+      int32_t target;
+      if (!sl.enabled) {
+        target = pos;  // 未使能：跟随当前位置
+      } else {
+        if (pos >= sl.cfg.travel_limit) {
+          sl.direction = -1;
+        } else if (pos <= -sl.cfg.travel_limit) {
+          sl.direction = 1;
+        }
+        if (sl.direction != sl.last_direction) {
+          KAYLORDUT_LOG_WARN("[{}] 到达位置限位! pos={} 方向切换: {} -> {}",
+                    sl.cfg.name, pos,
+                    sl.last_direction > 0 ? "+" : "-",
+                    sl.direction > 0 ? "+" : "-");
+          sl.last_direction = sl.direction;
+        }
+        target = pos + sl.direction * sl.cfg.step;
+
+        if (!sl.initial_pos_recorded) {
+          sl.initial_pos = pos;
+          sl.min_pos = sl.max_pos = pos;
+          sl.initial_pos_recorded = true;
+          sl.last_direction = sl.direction;
+          KAYLORDUT_LOG_INFO("[{}] 电机使能! 初始位置: {}, 往返范围: [{} ~ {}]",
+                    sl.cfg.name, pos, -sl.cfg.travel_limit, sl.cfg.travel_limit);
+        } else {
+          if (pos > sl.max_pos) sl.max_pos = pos;
+          if (pos < sl.min_pos) sl.min_pos = pos;
+        }
+      }
+
+      // 打印
+      if (do_print) {
+        std::string al_str = AlStateToString(s.al_state);
+        std::string status_str = StatusToString(status);
+        const char* dir_str = (sl.direction > 0) ? "↑" : "↓";
+        KAYLORDUT_LOG_INFO("[{}] [t={:5}ms] AL={} Status=[{}] pos={} target={} vel={} tor={} {}",
+                  sl.cfg.name, iter, al_str, status_str, pos, target, vel, tor, dir_str);
+      }
+
+      // 写 PDO
+      EC_WRITE_U16(pd + sl.off_control_word, ctrl);
+      EC_WRITE_S32(pd + sl.off_target_position, target);
     }
 
-    // 每 100 次循环打印一次状态（1秒）—— 显示当前位置和目标位置
-    if (iter % 100 == 0) {
-      uint8_t al_state = s.al_state;  // bit-field 需要先复制到临时变量
-      std::string al_str = AlStateToString(al_state);
-      std::string status_str = StatusToString(status);
-      const char* dir_str = (direction > 0) ? "↑" : "↓";  // 方向指示
-      KAYLORDUT_LOG_INFO("[t={:5}ms] AL={} Status=[{}] pos={} target={} vel={} tor={} {}{}{}",
-                iter, al_str, status_str, pos, target, vel, tor, dir_str,
-                enabled ? " ENABLED" : "",
-                fault_seen ? " FAULT" : "");
-    }
-
-    // 写控制字和目标位置
-    EC_WRITE_U16(pd + off.control_word, ctrl);
-    EC_WRITE_S32(pd + off.target_position, target);
-
-    // DC 时钟同步
+    // DC 时钟同步（全局）
     clock_gettime(CLOCK_MONOTONIC, &t);
     app_time = (uint64_t)t.tv_sec * NSEC_PER_SEC + t.tv_nsec;
     ecrt_master_application_time(master, app_time);
     ecrt_master_sync_reference_clock(master);
     ecrt_master_sync_slave_clocks(master);
 
-    // 发送 PDO 数据
     ecrt_domain_queue(domain);
     ecrt_master_send(master);
 
-    // 更新下一个周期时间
-    next.tv_nsec += CYCLE_NS;
+    next.tv_nsec += gcfg.cycle_ns;
     while (next.tv_nsec >= NSEC_PER_SEC) {
       next.tv_nsec -= NSEC_PER_SEC;
       next.tv_sec++;
     }
-
     iter++;
   }
 
-  // 结果输出
-  std::string final_al_str = AlStateToString(final_al_state);
-  std::string final_status_str = StatusToString(final_status);
-
+  // ===== 测试结果 =====
   KAYLORDUT_LOG_INFO("========== 测试结果 ==========");
   KAYLORDUT_LOG_INFO("状态缩写说明:");
   KAYLORDUT_LOG_INFO("  AL: INIT, PREOP, SAFEOP, OP");
   KAYLORDUT_LOG_INFO("  Status: Rdy(Ready) On(On) Ena(Enabled) Flt(Fault) Vol(Voltage)");
   KAYLORDUT_LOG_INFO("          Dis(Disabled) Tgt(TargetReached) Ign(IgnoringTarget)");
   KAYLORDUT_LOG_INFO("");
-  KAYLORDUT_LOG_INFO("运行时间: {} ms", duration_ms);
-  KAYLORDUT_LOG_INFO("实际循环: {} 次", iter);
-  KAYLORDUT_LOG_INFO("AL state: {} (OP={})", final_al_str, op_reached ? "YES" : "NO");
-  KAYLORDUT_LOG_INFO("最终状态: [{}]", final_status_str);
+  KAYLORDUT_LOG_INFO("运行时间: {} ms, 实际循环: {} 次", duration_ms, iter);
 
-  if (initial_pos_recorded) {
-    // 电机使能过，显示有效行程统计
-    int32_t travel = max_pos - initial_pos;  // 从初始位置开始的净行程
-    int32_t total_range = max_pos - min_pos;  // 最大范围（包含往返）
-    bool motor_moved = (travel > 1000) || (max_pos != initial_pos);
-
-    KAYLORDUT_LOG_INFO("初始位置: {} (使能后)", initial_pos);
-    KAYLORDUT_LOG_INFO("位置范围: [{} ~ {}]", min_pos, max_pos);
-    KAYLORDUT_LOG_INFO("净行程: {} (当前位置 - 初始位置)", travel);
-    KAYLORDUT_LOG_INFO("总范围: {} (最大值 - 最小值)", total_range);
-
-    // 结论
-    if (motor_moved) {
-      KAYLORDUT_LOG_INFO(">>> 结论: MOTOR_ROTATED (净行程={}) — 电机持续转动成功!", travel);
+  for (const auto& sl : slaves) {
+    std::string al_str = AlStateToString(sl.final_al_state);
+    std::string status_str = StatusToString(sl.final_status);
+    KAYLORDUT_LOG_INFO("[{}] AL={} Status=[{}]", sl.cfg.name, al_str, status_str);
+    if (sl.initial_pos_recorded) {
+      int32_t travel = sl.max_pos - sl.initial_pos;
+      int32_t total_range = sl.max_pos - sl.min_pos;
+      bool moved = (travel > 1000) || (sl.max_pos != sl.initial_pos);
+      KAYLORDUT_LOG_INFO("    初始位置: {}, 范围: [{} ~ {}], 净行程: {}, 总范围: {}",
+                sl.initial_pos, sl.min_pos, sl.max_pos, travel, total_range);
+      if (moved) {
+        KAYLORDUT_LOG_INFO("    >>> 结论: MOTOR_ROTATED (净行程={})", travel);
+      } else {
+        KAYLORDUT_LOG_INFO("    >>> 结论: NOT_WORKING");
+      }
     } else {
-      KAYLORDUT_LOG_INFO(">>> 结论: NOT_WORKING (enabled={}, OP={}, fault={})",
-                enabled ? 1 : 0, op_reached ? 1 : 0, fault_seen ? 1 : 0);
+      KAYLORDUT_LOG_INFO("    行程统计: 未记录（该从站从未使能）");
+      KAYLORDUT_LOG_INFO("    >>> 结论: NOT_WORKING");
     }
-  } else {
-    // 电机从未使能，位置统计无效
-    KAYLORDUT_LOG_INFO("行程统计: 未记录（电机从未使能，位置无效）");
-    KAYLORDUT_LOG_INFO(">>> 结论: NOT_WORKING (enabled=0, OP={}, fault={})",
-              op_reached ? 1 : 0, fault_seen ? 1 : 0);
   }
+  KAYLORDUT_LOG_INFO("整体: OP={} fault={}", op_reached ? "YES" : "NO",
+            fault_seen ? "YES" : "NO");
 
   // 清理
   ecrt_master_deactivate(master);
   ecrt_release_master(master);
-
   return 0;
 }

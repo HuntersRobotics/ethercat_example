@@ -1,0 +1,32 @@
+# motor_continuous 配置文件
+# 修改本文件后无需重新编译，重新运行程序即生效
+# 用法: motor_continuous <duration_ms> [config_path]
+#   duration_ms = 0 表示无限运行 (Ctrl+C 退出)
+#   config_path  默认 Config/motor_continuous.yaml
+
+# ===== 全局参数 =====
+cycle_ns: 1000000          # 周期 (ns)，1ms = 1000Hz
+assign_activate: 0x0301    # DC 激活码 (Sync0)
+mode_of_operation: 8        # 对象 0x6060 模式，8 = CSP (周期同步位置)
+print_interval: 100         # 每多少周期打印一次状态行
+
+# ===== 从站列表 (1~N 个，每个独立配置运动参数) =====
+# 新增电机：复制下面一个 "- name:" 块，改 name 和 position 即可
+# 删除电机：注释掉对应块即可
+slaves:
+  - name: "motor_0"        # 从站名称 (仅用于打印标识)
+    alias: 0               # EtherCAT 别名
+    position: 0            # EtherCAT 物理位置
+    vendor_id: 0x00000766  # 厂商 ID (Renesas)
+    product_code: 0x00000802  # 产品代码 (RA8T2 CiA402)
+    step: 100              # 该从站每周期步进量 (位置单位)
+    travel_limit: 10000    # 该从站往返边界 (±，位置单位)
+
+  # 第二个电机示例 (取消注释即可启用)：
+  # - name: "motor_1"
+  #   alias: 0
+  #   position: 1
+  #   vendor_id: 0x00000766
+  #   product_code: 0x00000802
+  #   step: 100
+  #   travel_limit: 10000

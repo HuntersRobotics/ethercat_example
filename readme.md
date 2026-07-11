@@ -106,42 +106,72 @@ ec_sync_info_t slave_0_syncs[] = {
 
 ## motor_continuous 程序
 
-基于 `test_dc_scan` 验证过的配置（DC 激活码 `0x0301`，1ms 周期 / 1000Hz），实现电机持续转动的测试程序。目标位置采用**往返策略**：在 `±10000`（±1万）边界之间来回移动，每周期步进 `±100`，避免位置计数器长时间运行后溢出。
+通过 **YAML 配置文件** 管理参数的电机持续转动测试程序，支持 **1~N 个从站**，每个从站独立的运动参数（步进量、往返边界），所有从站启用 DC（Sync0）同步。新增/移除电机只需改配置文件，无需重新编译。
 
 ### 运行
 
 ```bash
 # 必须用 sudo：CSP+DC 模式需要实时调度 (SCHED_FIFO)，否则从站会掉状态
-sudo ./build/motor_continuous <duration_ms>
+sudo ./build/motor_continuous <duration_ms> [config_path]
 ```
 
 参数说明：
 - `duration_ms > 0`：运行指定毫秒后自动退出（如 `10000` = 10秒）
-- `duration_ms = 0`：**无限运行**，只有按 `Ctrl+C` 或收到 `SIGTERM` 才退出（退出前会反激活 master）
+- `duration_ms = 0`：**无限运行**，只有按 `Ctrl+C` 或收到 `SIGTERM` 才退出（退出前反激活 master）
+- `config_path`：可选，配置文件路径，默认 `Config/motor_continuous.yaml`
 
 ```bash
-sudo ./build/motor_continuous 10000   # 运行 10 秒
-sudo ./build/motor_continuous 0       # 无限运行，Ctrl+C 退出
+sudo ./build/motor_continuous 0                              # 无限运行，默认配置
+sudo ./build/motor_continuous 10000                          # 运行 10 秒
+sudo ./build/motor_continuous 0 Config/motor_continuous.yaml # 指定配置
 ```
+
+### 配置文件
+
+`Config/motor_continuous.yaml`：
+
+```yaml
+# 全局参数
+cycle_ns: 1000000          # 周期 (ns)，1ms = 1000Hz
+assign_activate: 0x0301    # DC 激活码 (Sync0)
+mode_of_operation: 8        # 0x6060 模式，8 = CSP
+print_interval: 100         # 每多少周期打印一次
+
+# 从站列表（1~N 个，每个独立配置）
+slaves:
+  - name: "motor_0"
+    alias: 0
+    position: 0
+    vendor_id: 0x00000766
+    product_code: 0x00000802
+    step: 100              # 该从站每周期步进量
+    travel_limit: 10000    # 该从站往返边界 (±)
+```
+
+- **全局**：`cycle_ns`、`assign_activate`、`mode_of_operation`、`print_interval`
+- **每从站**：`name`（打印标识）、`alias`/`position`/`vendor_id`/`product_code`（身份）、`step`/`travel_limit`（运动）
+- 新增电机：复制一个 `- name:` 块，改 `name` 和 `position` 即可
+- 配置错误（文件不存在/字段缺失/类型不对）会 **fail loud** 退出（退出码 1）
 
 ### 为什么必须 sudo
 
-程序启用了实时调度（`SCHED_FIFO` 最高优先级 + `mlockall` 锁定内存 + 栈预锁定）。CSP+DC 模式对周期精度要求极高，普通用户态进程会被调度抢占导致周期抖动，从站收不到及时的周期数据，**watchdog 超时后会从 OP 掉到 SAFEOP / PREOP / INIT**。非 root 运行时 `sched_setscheduler` 会失败，日志会有警告。
+程序启用实时调度（`SCHED_FIFO` 最高优先级 + `mlockall` 锁内存 + 栈预锁定）。CSP+DC 模式对周期精度要求极高，普通用户态进程会被调度抢占导致周期抖动，从站收不到及时周期数据，**watchdog 超时后会从 OP 掉到 SAFEOP / PREOP / INIT**。
 
 ### 打印格式说明
 
-每个周期（每秒打印一次）输出格式：
+每个周期（按 `print_interval`）每个从站各打印一行：
 ```
-[t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=9976 target=10076 vel=120 tor=15 ↑ ENABLED
+[motor_0] [t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=9976 target=10076 vel=120 tor=15 ↑
 ```
-- `pos`：当前位置（电机反馈 0x6064）
-- `target`：目标位置（pos ± 100）
-- `vel`：实际速度（电机反馈 0x606c）
-- `tor`：实际扭矩（电机反馈 0x6077，单位 0.001 Nm）
+- `[motor_0]`：从站名称
+- `pos`：当前位置（0x6064）
+- `target`：目标位置（pos ± step）
+- `vel`：实际速度（0x606c）
+- `tor`：实际扭矩（0x6077，单位 0.001 Nm）
 - `↑/↓`：当前移动方向
 
-状态缩写（程序启动和结束各打印一次图例）：
+状态缩写（启动和结束各打印一次图例）：
 - **AL 状态**：`INIT` / `PREOP` / `SAFEOP` / `OP`
 - **Status**：`Rdy`(Ready) `On`(Switched On) `Ena`(Enabled) `Flt`(Fault) `Vol`(Voltage) `Dis`(Disabled) `Tgt`(Target Reached) `Ign`(Ignoring Target)
 
-到达位置限位（±1万）方向切换时，会打印一条 `[WARN]` 日志。
+从站到达各自往返边界（±`travel_limit`）方向切换时，打印一条 `[WARN]` 日志。
