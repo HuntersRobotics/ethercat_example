@@ -6,19 +6,21 @@
 
 `motor_continuous` 是一个**单线程实时 EtherCAT 主站程序**，使用 CSP（Cyclic Synchronous Position，周期同步位置）模式 + DC（Distributed Clock，分布式时钟）同步，让电机在固定区间内往返转动。
 
-核心要素全部来自 `test_dc_scan` 实测验证过的配置：
+**通过 YAML 配置文件管理参数**（`Config/motor_continuous.yaml`），支持 **1~N 个从站**，每个从站独立的运动参数（步进量、往返边界）。新增/移除电机只需改配置文件，无需重新编译。
+
+核心要素来自 `test_dc_scan` 实测验证过的配置（现均可在 YAML 调整）：
 - DC 激活码 `0x0301`（Sync0 周期同步）
 - 1ms 周期（1000Hz）
 - CSP 模式（对象 `0x6060` = 8）
 - 完整的 CiA402 状态机驱动
 
-目标位置采用**往返策略**：在 `±10000`（±1万）边界之间来回移动，每周期步进 `±100`。这样既能让电机持续转动，又避免位置计数器长时间运行后溢出（int32 上限约 ±21.4 亿）。
+目标位置采用**往返策略**：每个从站在各自 `±travel_limit` 边界之间来回移动，每周期步进 `±step`。既能让电机持续转动，又避免位置计数器长时间运行后溢出（int32 上限约 ±21.4 亿）。
 
 ## 2. 程序流程图
 
 ![motor_continuous 程序流程图](flowchart.png)
 
-程序分为三个阶段：**初始化（浅蓝）→ 主循环（浅橙）→ 清理（浅灰）**。
+程序分为三个阶段：**初始化（浅蓝）→ 主循环（浅橙）→ 清理（浅灰）**。流程图展示单个从站的执行流程；多从站时，主循环内的"读反馈→状态机→目标策略→写PDO"对每个从站依次执行一遍。
 
 ## 3. 详细分析
 
@@ -26,12 +28,13 @@
 
 | 步骤 | 说明 |
 |------|------|
-| 解析参数 | `duration_ms`，`0` 表示无限运行（仅 Ctrl+C 退出） |
+| 解析参数 | `duration_ms`（`0`=无限）+ 可选 `config_path` |
+| 读取配置 | 加载 YAML → 全局参数 + 从站列表，失败则 fail loud 退出 |
 | 注册信号 | `SIGINT` / `SIGTERM` → 置 `g_running = false`，优雅退出 |
 | 实时调度 | `SCHED_FIFO` 最高优先级 + `mlockall` 锁内存 + 栈预锁定 |
-| EtherCAT 初始化 | `request_master` / `create_domain` / `slave_config` |
-| PDO 注册 | 6 个 PDO 项（见下表） |
-| 模式与 DC | CSP 模式 (`0x6060=8`) + DC 配置 (`0x0301`, 1ms) |
+| EtherCAT 初始化 | `request_master` / `create_domain` |
+| 从站配置 | 遍历从站：`slave_config` + 注册 6 个 PDO + CSP 模式 + DC 配置 |
+| PDO 注册 | 汇总所有从站的 PDO 项，一次性 `reg_pdo_entry_list` |
 | 激活 | `ecrt_master_activate` + DC 参考时钟同步 |
 
 **注册的 6 个 PDO 项**：
@@ -49,16 +52,16 @@
 
 ### 3.2 主循环（1ms / 1000Hz）
 
-每个周期固定执行：
+每个周期固定执行（步骤 3~7 对**每个从站**依次执行一遍）：
 
 1. **`clock_nanosleep`** 等待下一个绝对时间点（保证周期精度）
-2. **接收处理**：`ecrt_master_receive` + `ecrt_domain_process`
-3. **读反馈**：status / pos / vel / tor
-4. **CiA402 状态机**：根据 status 低 6 位计算 control_word
-5. **目标策略**：计算 target（见 3.3）
-6. **打印**：每 100 周期打印一行
-7. **写 PDO**：control_word + target_position
-8. **DC 同步 + 发送**：`sync_reference_clock` / `sync_slave_clocks` / `queue` / `send`
+2. **接收处理**（全局一次）：`ecrt_master_receive` + `ecrt_domain_process`
+3. **遍历从站** → 读反馈：status / pos / vel / tor
+4. → **CiA402 状态机**：根据 status 低 6 位计算 control_word
+5. → **目标策略**：计算 target（见 3.3，用该从站的 step / travel_limit）
+6. → **打印**：每 `print_interval` 周期打印一行（带从站名）
+7. → **写 PDO**：control_word + target_position
+8. **DC 同步 + 发送**（全局一次）：`sync_reference_clock` / `sync_slave_clocks` / `queue` / `send`
 9. **iter++**，更新下一周期时间
 
 #### CiA402 状态机
@@ -80,10 +83,10 @@
 未使能 (!enabled):
     target = pos                    // 跟随当前位置，不产生运动指令
 
-已使能:
-    if pos >= +10000: direction = -1     // 到达上限，反向
-    if pos <= -10000: direction = +1     // 到达下限，正向
-    target = pos + direction * 100       // 按当前方向步进 100
+已使能 (用该从站的 step / travel_limit):
+    if pos >= +travel_limit: direction = -1   // 到达上限，反向
+    if pos <= -travel_limit: direction = +1   // 到达下限，正向
+    target = pos + direction * step           // 按当前方向步进
 ```
 
 - **方向切换瞬间**打印一条 `[WARN]` 日志（用 `last_direction` 检测变化，避免刷屏）
@@ -110,16 +113,18 @@ StackPrefault();                           // 3. 预先触发栈页错误
 
 ## 4. 打印格式
 
+每个周期（按 `print_interval`）每个从站各打印一行：
 ```
-[t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=9976 target=10076 vel=120 tor=15 ↑ ENABLED
+[motor_0] [t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=9976 target=10076 vel=120 tor=15 ↑
 ```
 
 | 字段 | 含义 |
 |------|------|
+| `[motor_0]` | 从站名称（YAML 里的 `name`） |
 | `AL` | EtherCAT 从站状态：INIT / PREOP / SAFEOP / OP |
 | `Status` | CiA402 状态位：`Rdy` `On` `Ena` `Flt` `Vol` `Dis` `Tgt` `Ign` |
 | `pos` | 当前位置（`0x6064`） |
-| `target` | 目标位置（pos ± 100） |
+| `target` | 目标位置（pos ± step） |
 | `vel` | 实际速度（`0x606c`） |
 | `tor` | 实际扭矩（`0x6077`，单位 0.001 Nm） |
 | `↑/↓` | 当前移动方向 |
@@ -145,6 +150,7 @@ StackPrefault();                           // 3. 预先触发栈页错误
 | 文件 | 说明 |
 |------|------|
 | `motor_continuous.cpp` | 程序源码 |
+| `Config/motor_continuous.yaml` | YAML 配置文件（参数 + 从站列表） |
 | `Document/flowchart.dot` | 流程图 Graphviz 源文件 |
 | `Document/flowchart.png` | 流程图渲染图片 |
 | `readme.md` | 编译/运行说明 |
