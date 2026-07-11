@@ -1,0 +1,52 @@
+digraph motor_continuous {
+    rankdir=TB;
+    fontname="Noto Sans CJK SC";
+    node [fontname="Noto Sans CJK SC", fontsize=11];
+    edge [fontname="Noto Sans CJK SC", fontsize=9];
+    nodesep=0.4;
+    ranksep=0.55;
+
+    // ===== 初始化阶段 (浅蓝) =====
+    start [label="开始" shape=ellipse style=filled fillcolor="#e3f2fd"];
+    parse [label="解析参数 duration_ms\n(0 = 无限运行)" shape=box style=filled fillcolor="#e3f2fd"];
+    signal [label="注册信号处理\nSIGINT / SIGTERM" shape=box style=filled fillcolor="#e3f2fd"];
+    rt [label="实时调度\nSCHED_FIFO + mlockall\n+ 栈预锁定" shape=box style=filled fillcolor="#e3f2fd"];
+    ec_init [label="初始化 EtherCAT\nrequest_master / create_domain\nslave_config (0x0766/0x0802)" shape=box style=filled fillcolor="#e3f2fd"];
+    pdo [label="注册 6 个 PDO 项\nCSP 模式 (0x6060=8)\n配置 DC (0x0301, 1ms)" shape=box style=filled fillcolor="#e3f2fd"];
+    activate [label="激活 master\n初始化 DC 参考时钟" shape=box style=filled fillcolor="#e3f2fd"];
+
+    // ===== 主循环 (浅橙) =====
+    loop [label="周期循环 (1ms / 1000Hz)" shape=box style=filled fillcolor="#fff3e0"];
+    sleep [label="clock_nanosleep\n等待下一个周期" shape=box style=filled fillcolor="#fff3e0"];
+    recv [label="master_receive +\ndomain_process" shape=box style=filled fillcolor="#fff3e0"];
+    read [label="读取反馈值\nstatus / pos / vel(606c) / tor(6077)" shape=box style=filled fillcolor="#fff3e0"];
+    sm [label="CiA402 状态机\n计算 control_word\nenabled = (low==0x27/0x37)" shape=box style=filled fillcolor="#fff3e0"];
+    enabled_check [label="enabled ?" shape=diamond style=filled fillcolor="#fff3e0"];
+    follow [label="target = pos\n(跟随当前位置)" shape=box style=filled fillcolor="#fff3e0"];
+    bound [label="往返边界判断\npos≥+1万 → dir=-1\npos≤-1万 → dir=+1\n(切换时打 WARN)" shape=diamond style=filled fillcolor="#fff3e0"];
+    target_calc [label="target = pos +\ndirection × 100" shape=box style=filled fillcolor="#fff3e0"];
+    stats [label="记录初始位置\n更新 min/max 统计" shape=box style=filled fillcolor="#fff3e0"];
+    print [label="每 100 周期打印\npos / target / vel / tor" shape=box style=filled fillcolor="#fff3e0"];
+    write [label="写 control_word +\ntarget_position" shape=box style=filled fillcolor="#fff3e0"];
+    sync [label="DC 时钟同步\nqueue + send" shape=box style=filled fillcolor="#fff3e0"];
+    next [label="更新周期时间\niter++" shape=box style=filled fillcolor="#fff3e0"];
+    loop_check [label="g_running &&\n(infinite || iter<total) ?" shape=diamond style=filled fillcolor="#fff3e0"];
+
+    // ===== 清理阶段 (浅灰) =====
+    result [label="打印测试结果\n行程统计 / 结论" shape=box style=filled fillcolor="#f5f5f5"];
+    cleanup [label="deactivate master\nrelease master" shape=box style=filled fillcolor="#f5f5f5"];
+    end [label="结束" shape=ellipse style=filled fillcolor="#f5f5f5"];
+
+    // ===== 连线 =====
+    start -> parse -> signal -> rt -> ec_init -> pdo -> activate -> loop;
+    loop -> sleep -> recv -> read -> sm -> enabled_check;
+    enabled_check -> follow [label="  否"];
+    enabled_check -> bound [label="  是"];
+    bound -> target_calc -> stats;
+    follow -> print;
+    stats -> print;
+    print -> write -> sync -> next -> loop_check;
+    loop_check -> loop [label="  是"];
+    loop_check -> result [label="  否/Ctrl+C"];
+    result -> cleanup -> end;
+}
