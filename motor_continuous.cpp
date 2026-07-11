@@ -21,6 +21,9 @@
 
 #include <ecrt.h>
 
+#include <sched.h>
+#include <sys/mman.h>
+
 #include <cstdint>
 #include <cstring>
 #include <csignal>
@@ -42,6 +45,13 @@
 static bool g_running = true;
 static void OnSignal(int) { g_running = false; }
 
+// 实时调度相关：预先触发栈页错误，避免运行时缺页延迟
+#define MAX_SAFE_STACK (8 * 1024)
+static void StackPrefault() {
+  unsigned char dummy[MAX_SAFE_STACK];
+  memset(dummy, 0, MAX_SAFE_STACK);
+}
+
 struct PdoOffset {
   unsigned int target_position;
   unsigned int control_word;
@@ -49,8 +59,8 @@ struct PdoOffset {
   unsigned int status_word;
 };
 
-// 安全限位
-static const int32_t kSafetyTravelLimit = 1000000;  // 100万行程限位
+// 位置限位
+static const int32_t kSafetyTravelLimit = 1000000;  // 位置往返边界 (±100万)
 
 // AL state 字符串映射
 std::string AlStateToString(uint8_t al_state) {
@@ -88,6 +98,19 @@ int main(int argc, char** argv) {
   signal(SIGINT, OnSignal);
   signal(SIGTERM, OnSignal);
 
+  // 实时调度：CSP+DC 模式要求周期稳定，否则从站会掉状态 (SAFEOP/INIT/PREOP)
+  struct sched_param sp = {};
+  sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
+  if (sched_setscheduler(0, SCHED_FIFO, &sp) == -1) {
+    KAYLORDUT_LOG_WARN("sched_setscheduler 失败: {} (建议用 sudo 运行)", strerror(errno));
+  } else {
+    KAYLORDUT_LOG_INFO("实时调度已启用: SCHED_FIFO 优先级 {}", sp.sched_priority);
+  }
+  if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+    KAYLORDUT_LOG_WARN("mlockall 失败: {}", strerror(errno));
+  }
+  StackPrefault();
+
   setvbuf(stdout, nullptr, _IONBF, 0);  // 无缓冲输出
 
   KAYLORDUT_LOG_INFO("========== CN032-9 电机持续转动测试 ==========");
@@ -99,7 +122,7 @@ int main(int argc, char** argv) {
   } else {
     KAYLORDUT_LOG_INFO("  超时时间: {} ms", duration_ms);
   }
-  KAYLORDUT_LOG_INFO("  目标策略: 当前位置 + 100 (每循环递增)");
+  KAYLORDUT_LOG_INFO("  目标策略: 在 ±{} 之间往返 (每循环 ±100)", kSafetyTravelLimit);
   KAYLORDUT_LOG_INFO("");
   KAYLORDUT_LOG_INFO("状态缩写说明:");
   KAYLORDUT_LOG_INFO("  AL状态: INIT, PREOP, SAFEOP, OP");
@@ -168,10 +191,11 @@ int main(int argc, char** argv) {
   bool fault_seen = false;
   bool safety_trip = false;
   bool initial_pos_recorded = false;  // 是否已记录初始位置
-  bool pos_stats_initialized = false;   // 位置统计是否已初始化
   int32_t initial_pos = 0;
   int32_t min_pos = 0;
   int32_t max_pos = 0;
+  int direction = 1;       // 移动方向: 1=正向(+100), -1=反向(-100)
+  int last_direction = 1;  // 上次方向（用于检测切换）
   uint16_t final_status = 0;
   uint16_t final_al_state = 0;
   int fault_reset_toggle = 0;
@@ -205,17 +229,6 @@ int main(int argc, char** argv) {
     if (s.al_state == 8) op_reached = true;
     if (status & 0x0008) fault_seen = true;
 
-    // 每 100 次循环打印一次状态（1秒）
-    if (iter % 100 == 0) {
-      uint8_t al_state = s.al_state;  // bit-field 需要先复制到临时变量
-      std::string al_str = AlStateToString(al_state);
-      std::string status_str = StatusToString(status);
-      KAYLORDUT_LOG_INFO("[t={:5}ms] AL={} Status=[{}] pos={}{}{}",
-                iter, al_str, status_str, pos,
-                enabled ? " ENABLED" : "",
-                fault_seen ? " FAULT" : "");
-    }
-
     // 完整的状态机处理（CiA402）
     uint16_t low = status & 0x6f;
     uint16_t ctrl;
@@ -239,16 +252,30 @@ int main(int argc, char** argv) {
       ctrl = 0x06;             // 安全停止
     }
 
-    // 目标策略：当前位置 + 100（持续递增）
+    // 目标策略：在 ±100万 之间往返（三角波）
     int32_t target;
     if (!enabled || safety_trip) {
       // 未使能时：跟随当前位置
       target = pos;
-      EC_WRITE_U16(pd + off.control_word, ctrl);
-      EC_WRITE_S32(pd + off.target_position, target);
     } else {
-      // **关键策略：每次 +100**
-      target = pos + 100;  // 当前位置 + 100
+      // **往返策略：到达边界后反向**
+      // 位置 >= +100万 → 反向减100
+      // 位置 <= -100万 → 正向加100
+      if (pos >= kSafetyTravelLimit) {
+        direction = -1;  // 到达上限，反向
+      } else if (pos <= -kSafetyTravelLimit) {
+        direction = 1;   // 到达下限，正向
+      }
+
+      // 方向切换时打 warning（只在切换瞬间，避免刷屏）
+      if (direction != last_direction) {
+        KAYLORDUT_LOG_WARN("到达位置限位! pos={} 方向切换: {} -> {}",
+                   pos,
+                   last_direction > 0 ? "+100" : "-100",
+                   direction > 0 ? "+100" : "-100");
+        last_direction = direction;
+      }
+      target = pos + direction * 100;  // 按当前方向移动100
 
       // 更新统计（只在使能后统计）
       if (!initial_pos_recorded) {
@@ -256,23 +283,31 @@ int main(int argc, char** argv) {
         initial_pos = pos;
         min_pos = max_pos = pos;
         initial_pos_recorded = true;
-        KAYLORDUT_LOG_INFO("电机使能! 初始位置: {}, 目标增量: +100", initial_pos);
+        last_direction = direction;  // 初始化方向记录
+        KAYLORDUT_LOG_INFO("电机使能! 初始位置: {}, 往返范围: [{} ~ {}]",
+                   initial_pos, -kSafetyTravelLimit, kSafetyTravelLimit);
       } else {
         // 后续位置更新（只在这里统计，避免在未使能时统计）
         if (pos > max_pos) max_pos = pos;
         if (pos < min_pos) min_pos = pos;
       }
-
-      // 安全限位检查
-      if (initial_pos_recorded && ((max_pos - min_pos) > kSafetyTravelLimit)) {
-        safety_trip = true;
-        KAYLORDUT_LOG_WARN("行程超限! 触发安全停止");
-      }
-
-      // 写控制字和目标位置
-      EC_WRITE_U16(pd + off.control_word, ctrl);
-      EC_WRITE_S32(pd + off.target_position, target);
     }
+
+    // 每 100 次循环打印一次状态（1秒）—— 显示当前位置和目标位置
+    if (iter % 100 == 0) {
+      uint8_t al_state = s.al_state;  // bit-field 需要先复制到临时变量
+      std::string al_str = AlStateToString(al_state);
+      std::string status_str = StatusToString(status);
+      const char* dir_str = (direction > 0) ? "↑" : "↓";  // 方向指示
+      KAYLORDUT_LOG_INFO("[t={:5}ms] AL={} Status=[{}] pos={} target={} {}{}{}",
+                iter, al_str, status_str, pos, target, dir_str,
+                enabled ? " ENABLED" : "",
+                fault_seen ? " FAULT" : "");
+    }
+
+    // 写控制字和目标位置
+    EC_WRITE_U16(pd + off.control_word, ctrl);
+    EC_WRITE_S32(pd + off.target_position, target);
 
     // DC 时钟同步
     clock_gettime(CLOCK_MONOTONIC, &t);
