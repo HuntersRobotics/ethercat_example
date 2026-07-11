@@ -1,22 +1,18 @@
 //
-// CN032-9 电机持续转动测试程序
+// motor_continuous - Renesas RA8T2 CiA402 电机持续转动测试程序
 // Copyright (c) 2026 kaylorchen
 // SPDX-License-Identifier: TBD
 //
 // 用法:
 //   motor_continuous <duration_ms>
-//   例: motor_continuous 10000
+//   例: motor_continuous 10000    (运行 10 秒)
+//       motor_continuous 0         (无限运行，Ctrl+C 退出)
 //
 // 功能:
-//   - 使用固定的 DC 激活码 0x0301
-//   - 1ms 周期 (1000Hz)
-//   - 目标策略: 当前位置 + 100 (每个循环递增)
-//   - 目的: 让电机持续转动
-//
-// 成功要素:
-//   - 借鉴 test_dc_scan 的成功要素
-//   - 使用完整的状态机处理
-//   - 固定 DC 配置
+//   - 硬件: Renesas EtherCAT RA8T2 CiA402 (Vendor 0x00000766, Product 0x00000802)
+//   - DC 激活码 0x0301, 1ms 周期 (1000Hz), CSP 模式
+//   - 目标策略: 在 ±100万 边界往返 (每周期 ±100)
+//   - 实时调度 SCHED_FIFO (需 sudo)
 //
 
 #include <ecrt.h>
@@ -113,7 +109,7 @@ int main(int argc, char** argv) {
 
   setvbuf(stdout, nullptr, _IONBF, 0);  // 无缓冲输出
 
-  KAYLORDUT_LOG_INFO("========== CN032-9 电机持续转动测试 ==========");
+  KAYLORDUT_LOG_INFO("========== Renesas RA8T2 电机持续转动测试 ==========");
   KAYLORDUT_LOG_INFO("配置参数:");
   KAYLORDUT_LOG_INFO("  DC 激活码: 0x{:X}", ASSIGN_ACTIVATE);
   KAYLORDUT_LOG_INFO("  周期: {} ns ({} ms = {} Hz)", CYCLE_NS, CYCLE_NS/1000000, 1000000000/CYCLE_NS);
@@ -189,7 +185,6 @@ int main(int argc, char** argv) {
   bool enabled = false;
   bool op_reached = false;
   bool fault_seen = false;
-  bool safety_trip = false;
   bool initial_pos_recorded = false;  // 是否已记录初始位置
   int32_t initial_pos = 0;
   int32_t min_pos = 0;
@@ -239,22 +234,19 @@ int main(int argc, char** argv) {
       ctrl = 0x0F;             // Ready/Switched on → Enable operation
     } else if (low == 0x27 || low == 0x37) {
       ctrl = 0x0F;             // Operation enabled
-      enabled = true;
     } else {
       ctrl = 0x0F;
     }
+    // 使能状态实时跟随 status（掉状态时自动回退为 false）
+    enabled = (low == 0x27 || low == 0x37);
 
     if (status & 0x0008) {     // Fault: 交替写 fault reset / shutdown
       ctrl = (fault_reset_toggle++ % 2) ? 0x06 : 0x80;
     }
 
-    if (safety_trip) {
-      ctrl = 0x06;             // 安全停止
-    }
-
     // 目标策略：在 ±100万 之间往返（三角波）
     int32_t target;
-    if (!enabled || safety_trip) {
+    if (!enabled) {
       // 未使能时：跟随当前位置
       target = pos;
     } else {
