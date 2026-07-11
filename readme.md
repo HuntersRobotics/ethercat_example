@@ -106,7 +106,7 @@ ec_sync_info_t slave_0_syncs[] = {
 
 ## motor_continuous 程序
 
-基于 `test_dc_scan` 验证过的配置（DC 激活码 `0x0301`，1ms 周期 / 1000Hz），实现电机持续转动的测试程序。目标位置采用**往返策略**：在 `±1000000`（±100万）边界之间来回移动，每周期步进 `±100`，避免位置计数器长时间运行后溢出。
+基于 `test_dc_scan` 验证过的配置（DC 激活码 `0x0301`，1ms 周期 / 1000Hz），实现电机持续转动的测试程序。目标位置采用**往返策略**：在 `±10000`（±1万）边界之间来回移动，每周期步进 `±100`，避免位置计数器长时间运行后溢出。
 
 ### 运行
 
@@ -132,14 +132,16 @@ sudo ./build/motor_continuous 0       # 无限运行，Ctrl+C 退出
 
 每个周期（每秒打印一次）输出格式：
 ```
-[t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=999776 target=999876 ↑ ENABLED
+[t= 100ms] AL=OP Status=[Rdy On Ena Vol] pos=9976 target=10076 vel=120 tor=15 ↑ ENABLED
 ```
 - `pos`：当前位置（电机反馈 0x6064）
 - `target`：目标位置（pos ± 100）
+- `vel`：实际速度（电机反馈 0x606c）
+- `tor`：实际扭矩（电机反馈 0x6077，单位 0.001 Nm）
 - `↑/↓`：当前移动方向
 
 状态缩写（程序启动和结束各打印一次图例）：
 - **AL 状态**：`INIT` / `PREOP` / `SAFEOP` / `OP`
 - **Status**：`Rdy`(Ready) `On`(Switched On) `Ena`(Enabled) `Flt`(Fault) `Vol`(Voltage) `Dis`(Disabled) `Tgt`(Target Reached) `Ign`(Ignoring Target)
 
-到达位置限位（±100万）方向切换时，会打印一条 `[WARN]` 日志。
+到达位置限位（±1万）方向切换时，会打印一条 `[WARN]` 日志。
