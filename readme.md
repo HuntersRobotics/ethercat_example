@@ -2,36 +2,60 @@
 
 基于 IgH EtherCAT Master 和 kaylordut 的电机控制示例，针对 **Renesas EtherCAT RA8T2 CiA402 2port** 伺服驱动器，使用 CSP（周期同步位置）模式 + DC（分布式时钟）同步实现电机持续转动。
 
-## 安装驱动和应用
+## 安装 EtherCAT 主站（驱动 + 应用）
+
+目标平台：Jetson Thor / JetPack 7.2（Ubuntu 24.04 noble），PREEMPT_RT 内核，Intel I225 网卡（igc 驱动）。
 
 ### 添加私有 APT 源
+
 ```bash
-cat << 'EOF' | sudo tee /etc/apt/sources.list.d/kaylordut.list 
-deb [arch=arm64 signed-by=/etc/apt/keyrings/kaylor-keyring.gpg] http://apt.kaylordut.cn/kaylordut/ kaylordut main
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL http://apt.renesas.kaylordut.com/renesas_pai-public-key.asc | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/renesas-pai.gpg
+cat << 'EOF' | sudo tee /etc/apt/sources.list.d/renesas-pai.list
+deb [arch=arm64 signed-by=/etc/apt/keyrings/renesas-pai.gpg] http://apt.renesas.kaylordut.com/ all stable
 EOF
-sudo mkdir /etc/apt/keyrings -pv
-sudo wget -O /etc/apt/keyrings/kaylor-keyring.gpg http://apt.kaylordut.cn/kaylor-keyring.gpg
 sudo apt update
 ```
 
-### 检查内核版本并安装驱动
-```bash
-uname -a
-# Linux ai-hunter 6.1.43-rt14-rockchip-rk3588 ... aarch64 GNU/Linux
+### 检查内核版本
 
-apt policy ethercat-module
-# 按输出选择与当前内核版本匹配的驱动包
-```
 ```bash
-# 注意：必须与当前内核版本完全匹配
-sudo apt install -y ethercat-module=6.1.43-rt14-rockchip-rk3588 # 内核为 6.1.43-rt14-rockchip-rk3588 时
-sudo apt install -y ethercat-module=5.10.160-rt89-rockchip-rk3588 # 内核为 5.10.160-rt89-rockchip-rk3588 时
+uname -r
+# 6.8.12-1021-rt-tegra   ← PREEMPT_RT 内核（非 RT 为 6.8.12-1021-tegra）
+cat /sys/kernel/realtime  # 1 = RT 内核
 ```
-> 请务必核对内核版本
+
+### 部署 EtherCAT 内核模块（ec_master / ec_igc / ec_generic）
+
+模块 `.ko` 的 vermagic 必须与当前内核完全匹配（`6.8.12-1021-rt-tegra SMP preempt_rt ... aarch64`），
+来自交叉编译产物（如 `deploy-6.8.12-1021-rt-tegra/ethercat-kos/`）：
+
+```bash
+MOD_VER=$(uname -r)   # 6.8.12-1021-rt-tegra
+sudo mkdir -p /lib/modules/$MOD_VER/updates/ethercat
+sudo cp ec_master.ko ec_igc.ko ec_generic.ko /lib/modules/$MOD_VER/updates/ethercat/
+sudo depmod -a $MOD_VER
+```
+
+### 配置并启动主站（I225 → igc）
+
+```bash
+# /etc/ethercat.conf 由 ethercat-master 包安装，按目标网卡修改
+sudo sed -i 's|^DEVICE_MODULES=.*|DEVICE_MODULES="igc"|' /etc/ethercat.conf
+sudo sed -i 's|^MASTER0_DEVICE=.*|MASTER0_DEVICE="<I225-MAC>"|' /etc/ethercat.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now ethercat
+ethercat slaves   # 应看到: 0  0:0  OP  Renesas EtherCAT RA8T2 CiA402 2port
+```
+
+> I225 网卡 MAC 获取（勿用 `ip -o link | head -1`，接口顺序与 PCI 顺序不一致）：
+> `for i in /sys/class/net/*; do d=$(basename $(readlink $i/device/driver 2>/dev/null) 2>/dev/null); [ "$d" = igc ] && cat $i/address; done`
 
 ### 安装应用
+
 ```bash
-sudo apt install -y ethercat-master
+sudo apt install -y ethercat-master   # 含 /usr/bin/ethercat、libethercat、ecrt.h（已由私有 APT 源提供，无需手动编译 IgH）
 ```
 
 ## 编译
@@ -187,7 +211,7 @@ sudo apt install -y debhelper       # 打包工具 (>= 12)
 dpkg-buildpackage -us -uc -b         # 生成 ../motor-continuous_1.0.0_arm64.deb
 ```
 
-> 前置：IgH EtherCAT master 需手动源码安装（提供 `ecrt.h` / `libethercat`），不通过 apt。
+> 前置：`ethercat-master` 通过私有 APT 源安装（提供 `ecrt.h` / `libethercat.so`），无需手动编译 IgH。内核模块（`ec_master.ko` 等）需按上文"部署 EtherCAT 内核模块"先就位。
 
 ### 安装与 service 管理
 
